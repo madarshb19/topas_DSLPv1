@@ -40,18 +40,18 @@ training:
                          # = ~7 optimizer steps per iter @ accumulation=88
 
   # Training data
-  train_data_dir: "/mnt/d/Bitterbot/research/topas_dslp/data"
+  train_data_dir: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data"
   eval_data_dir: ""
 
   # Eval dataset paths
   train_challenges: ""
   train_solutions: ""
-  eval_challenges: "/mnt/d/Bitterbot/research/topas_dslp/data/arc-agi_evaluation_challenges.json"
-  eval_solutions: "/mnt/d/Bitterbot/research/topas_dslp/data/arc-agi_evaluation_solutions.json"
+  eval_challenges: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_challenges.json"
+  eval_solutions: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_solutions.json"
 
   output_dir: "./output_topas"
   batch_size: 8          # Local batch size per forward pass (reduced for variable H_cycles)
-  accumulation_steps: 176 # Effective batch = 8 * 176 = 1408
+  accumulation_steps: 44 # Effective batch = 8 * 176 = 1408
   epochs: 50000          # More epochs to compensate for smaller epochs_per_iter
   learning_rate: 0.0001
   amp: true
