@@ -52,7 +52,7 @@ training:
   output_dir: "./output_topas"
   batch_size: 8          # Local batch size per forward pass (reduced for variable H_cycles)
   accumulation_steps: 44 # Effective batch = 8 * 176 = 1408
-  epochs: 50000          # More epochs to compensate for smaller epochs_per_iter
+  epochs: 500          # More epochs to compensate for smaller epochs_per_iter
   learning_rate: 0.0001
   amp: true
   log_interval: 10       # Log every N batches
