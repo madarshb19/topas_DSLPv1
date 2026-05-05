@@ -1060,7 +1060,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
     if world_size > 1:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[device.index], output_device=device.index
+            model, device_ids=[device.index], output_device=device.index, find_unused_parameters=True
         )
 
     # Set up optimizers
