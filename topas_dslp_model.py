@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
@@ -232,10 +233,12 @@ class TOPASDSPLModel(nn.Module):
         # Puzzle Embedding (TRM Turbo Memory - SignSGD with high LR)
         # Uses CastedSparseEmbedding for efficient sparse updates
         if puzzle_emb_ndim > 0:
+            ws = dist.get_world_size() if dist.is_initialized() else 1
+            local_batch = max(1, batch_size // ws)
             self.puzzle_emb = CastedSparseEmbedding(
                 num_embeddings=num_tasks,
                 embedding_dim=puzzle_emb_ndim,
-                batch_size=batch_size,
+                batch_size=local_batch,
                 init_std=0.01,
                 cast_to=torch.float32
             )
