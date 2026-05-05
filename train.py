@@ -1391,13 +1391,18 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     first_eval_step = train_cfg.get("first_eval_step", 0)
                     should_eval = (first_eval_step > 0 and global_step == first_eval_step) or \
                                   (eval_step_interval > 0 and global_step % eval_step_interval == 0)
-                    if should_eval and rank == 0:
-                        logger.info(f"[Step {global_step}] Running evaluation...")
-                        eval_model = ema_model if use_ema else model
-                        if hasattr(eval_model, 'module'):
-                            eval_model = eval_model.module
-                        eval_model.eval()
-                        step_eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+                    if should_eval:
+                        if world_size > 1:
+                            torch.distributed.barrier()
+                        if rank == 0:
+                            logger.info(f"[Step {global_step}] Running step-based evaluation...")
+                            eval_model = ema_model if use_ema else model
+                            if hasattr(eval_model, 'module'):
+                                eval_model = eval_model.module
+                            eval_model.eval()
+                            step_eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+                        if world_size > 1:
+                            torch.distributed.barrier()
                         model.train()
 
                         step_acc = step_eval_results["accuracy"]
@@ -1783,7 +1788,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     logger.info(f"[Step {global_step}] Checkpoint saved")
 
                 # Update EMA model
-                if use_ema:
+                if use_ema and rank == 0:
                     with torch.no_grad():
                         m_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
                         for k, v in ema_model.state_dict().items():
@@ -1838,11 +1843,16 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 logger.log_epoch(epoch, total_loss / n_batches, avg_epoch_losses, current_lr)
 
         # Epoch end: evaluate
-        if rank == 0 and epoch % train_cfg.get("eval_interval", 1) == 0:
-            eval_model = ema_model if use_ema else model
-            if hasattr(eval_model, 'module'):
-                eval_model = eval_model.module
-            eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+        if epoch % train_cfg.get("eval_interval", 1) == 0:
+            if world_size > 1:
+                torch.distributed.barrier()
+            if rank == 0:
+                eval_model = ema_model if use_ema else model
+                if hasattr(eval_model, 'module'):
+                    eval_model = eval_model.module
+                eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+            if world_size > 1:
+                torch.distributed.barrier()
             model.train()
 
             acc = eval_results["accuracy"]
