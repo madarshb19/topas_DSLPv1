@@ -1843,6 +1843,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 logger.log_epoch(epoch, total_loss / n_batches, avg_epoch_losses, current_lr)
 
         # Epoch end: evaluate
+        # Epoch end: evaluate
         if epoch % train_cfg.get("eval_interval", 1) == 0:
             if world_size > 1:
                 torch.distributed.barrier()
@@ -1851,98 +1852,87 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 if hasattr(eval_model, 'module'):
                     eval_model = eval_model.module
                 eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+                acc = eval_results["accuracy"]
+                avg_steps = eval_results["avg_steps"]
+                pixel_acc = eval_results["pixel_acc"]
+                nonzero_acc = eval_results["nonzero_acc"]
+                mean_iou = eval_results["mean_iou"]
+                partial = eval_results["partial_matches"]
+                per_class = eval_results["per_class_acc"]
+                # Detailed eval logging
+                logger.info(
+                    f"[Epoch {epoch}] Eval: {eval_results['solved']}/{eval_results['total']} solved "
+                    f"({acc*100:.2f}%) | Pixel Acc: {pixel_acc*100:.2f}% | "
+                    f"Non-BG Acc: {nonzero_acc*100:.2f}% | mIoU: {mean_iou*100:.2f}%"
+                )
+                logger.info(
+                    f"[Epoch {epoch}] Partial matches: >90%: {partial['>90%']}, "
+                    f">80%: {partial['>80%']}, >70%: {partial['>70%']}, >50%: {partial['>50%']} | "
+                    f"Avg Steps: {avg_steps:.1f}"
+                )
+                # Per-class accuracy (only show classes with data)
+                class_strs = [f"C{i}:{v*100:.1f}%" for i, v in enumerate(per_class) if v is not None]
+                if class_strs:
+                    logger.info(f"[Epoch {epoch}] Per-class Acc: {' '.join(class_strs)}")
+                # Per-task non-BG accuracy - show top 10 performers
+                task_nonbg_list = eval_results.get("task_nonbg_accs", [])
+                if task_nonbg_list:
+                    sorted_tasks = sorted(enumerate(task_nonbg_list), key=lambda x: x[1], reverse=True)
+                    top_10 = sorted_tasks[:10]
+                    top_strs = [f"T{idx}:{acc*100:.1f}%" for idx, acc in top_10]
+                    logger.info(f"[Epoch {epoch}] Top 10 tasks (Non-BG): {' '.join(top_strs)}")
+                    best_idx, best_acc = top_10[0]
+                    logger.info(f"[Epoch {epoch}] Best task: T{best_idx} at {best_acc*100:.2f}% Non-BG")
+                # Log to TensorBoard
+                logger.log_eval(epoch, acc, avg_steps, eval_results['solved'], eval_results['total'])
+                if logger.tb_writer:
+                    logger.tb_writer.add_scalar("eval/pixel_accuracy", pixel_acc, epoch)
+                    logger.tb_writer.add_scalar("eval/nonzero_accuracy", nonzero_acc, epoch)
+                    logger.tb_writer.add_scalar("eval/mean_iou", mean_iou, epoch)
+                    logger.tb_writer.add_scalar("eval/partial_90", partial['>90%'], epoch)
+                    logger.tb_writer.add_scalar("eval/partial_80", partial['>80%'], epoch)
+                    for i, v in enumerate(per_class):
+                        if v is not None:
+                            logger.tb_writer.add_scalar(f"eval/class_{i}_acc", v, epoch)
+                # Generate multi-page PDF visualization with error mapping
+                try:
+                    from visualization import create_eval_pdf_visualization
+                    vis_results = create_eval_pdf_visualization(
+                        eval_model, eval_data, device, epoch, logger.vis_dir,
+                        tasks_per_page=10, pad_class=10, min_steps=current_min_steps
+                    )
+                    logger.info(
+                        f"[Epoch {epoch}] Generated PDF visualization: {vis_results['pdf_path']} "
+                        f"({vis_results['total_correct']}/{vis_results['total']} correct)"
+                    )
+                    logger.info(
+                        f"[Epoch {epoch}] Errors: Wrong={vis_results['total_wrong_color']}, "
+                        f"Missed={vis_results['total_missed']}, FP={vis_results['total_false_pos']}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to generate PDF visualization: {e}")
+                # Log halting probability distribution (from first task)
+                if len(eval_data) > 0 and not train_cfg.get("_topas_mode", False):
+                    with torch.no_grad():
+                        test_sample = eval_data[0]
+                        t_in = test_sample[0].unsqueeze(0).to(device)
+                        t_out = test_sample[1].unsqueeze(0).to(device)
+                        test_in = test_sample[2].unsqueeze(0).to(device)
+                        target = test_sample[3].unsqueeze(0).to(device)
+                        mask = test_sample[4].unsqueeze(0).to(device)
+                        result = eval_model(
+                            t_in, t_out, test_in, mask, return_intermediate=True
+                        )
+                        _, inter_logits, halt_probs = result[0], result[1], result[2]
+                        logger.log_halting_probs(epoch, halt_probs)
+                # Save periodic checkpoint every 50 epochs
+                if epoch % 50 == 0:
+                    logger.save_checkpoint(model, optimizer, epoch, best=False, suffix=f"_epoch{epoch}",
+                                           extra_state={'global_step': global_step})
+                    logger.info(f"Periodic checkpoint saved at epoch {epoch}")
             if world_size > 1:
                 torch.distributed.barrier()
             model.train()
-
-            acc = eval_results["accuracy"]
-            avg_steps = eval_results["avg_steps"]
-            pixel_acc = eval_results["pixel_acc"]
-            nonzero_acc = eval_results["nonzero_acc"]
-            mean_iou = eval_results["mean_iou"]
-            partial = eval_results["partial_matches"]
-            per_class = eval_results["per_class_acc"]
-
-            # Detailed eval logging
-            logger.info(
-                f"[Epoch {epoch}] Eval: {eval_results['solved']}/{eval_results['total']} solved "
-                f"({acc*100:.2f}%) | Pixel Acc: {pixel_acc*100:.2f}% | "
-                f"Non-BG Acc: {nonzero_acc*100:.2f}% | mIoU: {mean_iou*100:.2f}%"
-            )
-            logger.info(
-                f"[Epoch {epoch}] Partial matches: >90%: {partial['>90%']}, "
-                f">80%: {partial['>80%']}, >70%: {partial['>70%']}, >50%: {partial['>50%']} | "
-                f"Avg Steps: {avg_steps:.1f}"
-            )
-            # Per-class accuracy (only show classes with data)
-            class_strs = [f"C{i}:{v*100:.1f}%" for i, v in enumerate(per_class) if v is not None]
-            if class_strs:
-                logger.info(f"[Epoch {epoch}] Per-class Acc: {' '.join(class_strs)}")
-
-            # Per-task non-BG accuracy - show top 10 performers (using non-BG acc, not pixel acc)
-            task_nonbg_list = eval_results.get("task_nonbg_accs", [])
-            if task_nonbg_list:
-                # Sort tasks by non-BG accuracy (descending) with their indices
-                sorted_tasks = sorted(enumerate(task_nonbg_list), key=lambda x: x[1], reverse=True)
-                top_10 = sorted_tasks[:10]
-                top_strs = [f"T{idx}:{acc*100:.1f}%" for idx, acc in top_10]
-                logger.info(f"[Epoch {epoch}] Top 10 tasks (Non-BG): {' '.join(top_strs)}")
-                # Also log the best accuracy
-                best_idx, best_acc = top_10[0]
-                logger.info(f"[Epoch {epoch}] Best task: T{best_idx} at {best_acc*100:.2f}% Non-BG")
-
-            # Log to TensorBoard
-            logger.log_eval(epoch, acc, avg_steps, eval_results['solved'], eval_results['total'])
-            if logger.tb_writer:
-                logger.tb_writer.add_scalar("eval/pixel_accuracy", pixel_acc, epoch)
-                logger.tb_writer.add_scalar("eval/nonzero_accuracy", nonzero_acc, epoch)
-                logger.tb_writer.add_scalar("eval/mean_iou", mean_iou, epoch)
-                logger.tb_writer.add_scalar("eval/partial_90", partial['>90%'], epoch)
-                logger.tb_writer.add_scalar("eval/partial_80", partial['>80%'], epoch)
-                # Per-class to TensorBoard
-                for i, v in enumerate(per_class):
-                    if v is not None:
-                        logger.tb_writer.add_scalar(f"eval/class_{i}_acc", v, epoch)
-
-            # Generate multi-page PDF visualization with error mapping
-            try:
-                from visualization import create_eval_pdf_visualization
-                vis_results = create_eval_pdf_visualization(
-                    eval_model, eval_data, device, epoch, logger.vis_dir,
-                    tasks_per_page=10, pad_class=10, min_steps=current_min_steps
-                )
-                logger.info(
-                    f"[Epoch {epoch}] Generated PDF visualization: {vis_results['pdf_path']} "
-                    f"({vis_results['total_correct']}/{vis_results['total']} correct)"
-                )
-                logger.info(
-                    f"[Epoch {epoch}] Errors: Wrong={vis_results['total_wrong_color']}, "
-                    f"Missed={vis_results['total_missed']}, FP={vis_results['total_false_pos']}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to generate PDF visualization: {e}")
-
-            # Log halting probability distribution (from first task)
-            # Skip for TOPAS mode - halting logging requires V3 grid format
-            if len(eval_data) > 0 and not train_cfg.get("_topas_mode", False):
-                with torch.no_grad():
-                    test_sample = eval_data[0]
-                    t_in = test_sample[0].unsqueeze(0).to(device)
-                    t_out = test_sample[1].unsqueeze(0).to(device)
-                    test_in = test_sample[2].unsqueeze(0).to(device)
-                    target = test_sample[3].unsqueeze(0).to(device)
-                    mask = test_sample[4].unsqueeze(0).to(device)
-                    result = eval_model(
-                        t_in, t_out, test_in, mask, return_intermediate=True
-                    )
-                    _, inter_logits, halt_probs = result[0], result[1], result[2]
-                    logger.log_halting_probs(epoch, halt_probs)
-
-            # Save periodic checkpoint every 50 epochs
-            if epoch % 50 == 0:
-                logger.save_checkpoint(model, optimizer, epoch, best=False, suffix=f"_epoch{epoch}",
-                                       extra_state={'global_step': global_step})
-                logger.info(f"Periodic checkpoint saved at epoch {epoch}")
 
     # Save final model and close logger
     if rank == 0:
