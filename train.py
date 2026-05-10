@@ -20,7 +20,9 @@ _TPU_AVAILABLE = False
 try:
     import torch_xla
     import torch_xla.core.xla_model as xm
+    import torch_xla.runtime as xr
     import torch_xla.distributed.parallel_loader as pl
+    import torch_xla.distributed.xla_multiprocessing as xmp
     _TPU_AVAILABLE = True
 except ImportError:
     pass
@@ -958,8 +960,8 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
     # Distributed setup (TPU or GPU)
     if use_tpu:
-        world_size = xm.xrt_world_size()
-        rank = xm.get_ordinal()
+        world_size = xr.world_size()         # was xm.xrt_world_size()
+        rank = xr.global_ordinal()           # was xm.get_ordinal()
         logger.info(f"TPU distributed: rank {rank}/{world_size}")
     else:
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -1230,11 +1232,15 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     # Automatic Mixed Precision
     # Note: TPU uses bfloat16 natively, no scaler needed
     if use_tpu:
-        use_amp = False  # TPU handles precision internally
-        scaler = None
-        logger.info("TPU mode: Using native bfloat16 precision")
+        use_amp = True   # use bf16 autocast on TPU
+        amp_device = 'xla'
+        amp_dtype = torch.bfloat16
+        scaler = None    # no scaler needed for bf16
+        logger.info("TPU mode: Using bf16 autocast")
     else:
         use_amp = train_cfg.get("amp", True) and torch.cuda.is_available()
+        amp_device = 'cuda'
+        amp_dtype = torch.float16
         scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
     # Loss weights
@@ -1313,7 +1319,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 puzzle_ids = batch['puzzle_id'].to(device) if 'puzzle_id' in batch else None
 
                 if use_amp:
-                    with torch.amp.autocast('cuda'):
+                    with torch.amp.autocast(amp_device, dtype=amp_dtype):
                         outputs = model(inputs, labels=labels, puzzle_identifiers=puzzle_ids, return_loss=True)
                         loss = outputs['loss']
                         q_halt = outputs.get('q_halt')
@@ -1393,7 +1399,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                                   (eval_step_interval > 0 and global_step % eval_step_interval == 0)
                     if should_eval:
                         if world_size > 1:
-                            torch.distributed.barrier()
+                            if use_tpu:
+                                xm.rendezvous("sync")
+                            else:
+                                torch.distributed.barrier()
                         if rank == 0:
                             logger.info(f"[Step {global_step}] Running step-based evaluation...")
                             eval_model = ema_model if use_ema else model
@@ -1402,7 +1411,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                             eval_model.eval()
                             step_eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
                         if world_size > 1:
-                            torch.distributed.barrier()
+                            if use_tpu:
+                                xm.rendezvous("sync")
+                            else:
+                                torch.distributed.barrier()
                         model.train()
 
                         step_acc = step_eval_results["accuracy"]
@@ -1552,7 +1564,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                         prev_z_L = torch.stack(batch_prev_states, dim=0)
 
             if use_amp:
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast(amp_device, dtype=amp_dtype):
                     result = model(
                         train_in, train_out, test_in, demo_mask,
                         task_ids=task_ids,
@@ -1679,7 +1691,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     # TPU: Use xm.optimizer_step for gradient sync across cores
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
-                        xm.optimizer_step(opt)
+                        xm.optimizer_step(opt, barrier=True)
                 elif use_amp:
                     # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
                     for opt in optimizers:
@@ -1846,7 +1858,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
         # Epoch end: evaluate
         if epoch % train_cfg.get("eval_interval", 1) == 0:
             if world_size > 1:
-                torch.distributed.barrier()
+                if use_tpu:
+                    xm.rendezvous("sync")
+                else:
+                    torch.distributed.barrier()
             if rank == 0:
                 eval_model = ema_model if use_ema else model
                 if hasattr(eval_model, 'module'):
@@ -1931,7 +1946,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                                            extra_state={'global_step': global_step})
                     logger.info(f"Periodic checkpoint saved at epoch {epoch}")
             if world_size > 1:
-                torch.distributed.barrier()
+                if use_tpu:
+                    xm.rendezvous("sync")
+                else:
+                    torch.distributed.barrier()
             model.train()
 
     # Save final model and close logger
@@ -1942,18 +1960,30 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
         logger.close()
 
 
+def _mp_fn(rank, args):
+    train(
+        config_path=args.config,
+        resume_checkpoint=args.resume,
+        use_tpu=True,
+        tpu_cores=args.tpu_cores,
+    )
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Train DSPL model')
-    parser.add_argument('--config', type=str, default='config.yaml',
-                        help='Path to config file (default: config.yaml)')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint to resume from (overrides config)')
-    # TPU support
-    parser.add_argument('--tpu', action='store_true',
-                        help='Use TPU instead of GPU (requires torch_xla)')
-    parser.add_argument('--tpu-cores', type=int, default=8,
-                        help='Number of TPU cores (default: 8 for v5e-8)')
+    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--tpu', action='store_true')
+    parser.add_argument('--tpu-cores', type=int, default=8)
     args = parser.parse_args()
-    train(config_path=args.config, resume_checkpoint=args.resume,
-          use_tpu=args.tpu, tpu_cores=args.tpu_cores)
+
+    if args.tpu:
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(_mp_fn, args=(args,), nprocs=args.tpu_cores, start_method='fork')
+    else:
+        train(
+            config_path=args.config,
+            resume_checkpoint=args.resume,
+            use_tpu=False,
+            tpu_cores=args.tpu_cores,
+        )
