@@ -4,9 +4,7 @@
 # ============================================================
 import sys, types
 
-_tf_broken = "tensorflow" not in sys.modules or not hasattr(
-    sys.modules.get("tensorflow", None), "io"
-)
+_tf_broken = not hasattr(sys.modules.get("tensorflow"), "io")
 if _tf_broken:
     _tf = types.ModuleType("tensorflow")
     _tf_io = types.ModuleType("tensorflow.io")
@@ -14,9 +12,19 @@ if _tf_broken:
     _tf_gfile.join = lambda *args: "/".join(str(a) for a in args)
     _tf_io.gfile = _tf_gfile
     _tf.io = _tf_io
-    sys.modules["tensorflow"] = _tf
-    sys.modules["tensorflow.io"] = _tf_io
-    sys.modules["tensorflow.io.gfile"] = _tf_gfile
+
+    # Required: torch._dynamo inspects __spec__ of every module in sys.modules
+    import importlib.util
+    for mod_name, mod_obj in [
+        ("tensorflow", _tf),
+        ("tensorflow.io", _tf_io),
+        ("tensorflow.io.gfile", _tf_gfile),
+    ]:
+        spec = importlib.util.spec_from_loader(mod_name, loader=None)
+        mod_obj.__spec__ = spec
+        mod_obj.__loader__ = None
+        mod_obj.__package__ = mod_name.rsplit(".", 1)[0] if "." in mod_name else mod_name
+        sys.modules[mod_name] = mod_obj
 # ============================================================
 
 import os
