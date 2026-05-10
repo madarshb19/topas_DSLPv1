@@ -1376,7 +1376,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 if (batch_idx + 1) % accumulation_steps == 0:
                     if use_tpu:
                         # TPU: Use xm.optimizer_step for gradient sync across cores
-                        xm.optimizer_step(optimizer)
+                        xm.optimizer_step(optimizer, barrier=True)
                     elif use_amp:
                         scaler.step(optimizer)
                         scaler.update()
@@ -1961,6 +1961,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
 
 def _mp_fn(rank, args):
+    """Per-core entry point for TPU multi-processing."""
     train(
         config_path=args.config,
         resume_checkpoint=args.resume,
@@ -1971,19 +1972,19 @@ def _mp_fn(rank, args):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Train DSPL model')
-    parser.add_argument('--config', type=str, default='config.yaml')
-    parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--tpu', action='store_true')
-    parser.add_argument('--tpu-cores', type=int, default=8)
+    parser.add_argument('--config', type=str, default='config.yaml',
+                        help='Path to config file (default: config.yaml)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from (overrides config)')
+    parser.add_argument('--tpu', action='store_true',
+                        help='Use TPU instead of GPU (requires torch_xla)')
+    parser.add_argument('--tpu-cores', type=int, default=8,
+                        help='Number of TPU cores (default: 8 for v5e-8)')
     args = parser.parse_args()
 
     if args.tpu:
         import torch_xla.distributed.xla_multiprocessing as xmp
         xmp.spawn(_mp_fn, args=(args,), nprocs=args.tpu_cores, start_method='fork')
     else:
-        train(
-            config_path=args.config,
-            resume_checkpoint=args.resume,
-            use_tpu=False,
-            tpu_cores=args.tpu_cores,
-        )
+        train(config_path=args.config, resume_checkpoint=args.resume,
+              use_tpu=False, tpu_cores=args.tpu_cores)
