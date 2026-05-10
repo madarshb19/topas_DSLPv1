@@ -1,3 +1,24 @@
+# ============================================================
+# TF MODULE STUB — must be first, before any other imports
+# Fixes broken tensorflow namespace after tf→tensorflow-cpu swap
+# ============================================================
+import sys, types
+
+_tf_broken = "tensorflow" not in sys.modules or not hasattr(
+    sys.modules.get("tensorflow", None), "io"
+)
+if _tf_broken:
+    _tf = types.ModuleType("tensorflow")
+    _tf_io = types.ModuleType("tensorflow.io")
+    _tf_gfile = types.ModuleType("tensorflow.io.gfile")
+    _tf_gfile.join = lambda *args: "/".join(str(a) for a in args)
+    _tf_io.gfile = _tf_gfile
+    _tf.io = _tf_io
+    sys.modules["tensorflow"] = _tf
+    sys.modules["tensorflow.io"] = _tf_io
+    sys.modules["tensorflow.io.gfile"] = _tf_gfile
+# ============================================================
+
 import os
 import math
 import json
