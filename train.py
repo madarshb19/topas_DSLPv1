@@ -1235,7 +1235,8 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
         logger.info("TPU mode: Using native bfloat16 precision")
     else:
         use_amp = train_cfg.get("amp", True) and torch.cuda.is_available()
-        scaler = torch.amp.GradScaler('cuda') if use_amp else None
+        amp_dtype = torch.bfloat16  # bf16 on Ada/Hopper, fp16 only on older cards
+        scaler = None  # not needed for bf16
 
     # Loss weights
     lw = config.get("loss_weights", {})
@@ -1313,7 +1314,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 puzzle_ids = batch['puzzle_id'].to(device) if 'puzzle_id' in batch else None
 
                 if use_amp:
-                    with torch.amp.autocast('cuda'):
+                    with torch.amp.autocast('cuda', dtype=amp_dtype):
                         outputs = model(inputs, labels=labels, puzzle_identifiers=puzzle_ids, return_loss=True)
                         loss = outputs['loss']
                         q_halt = outputs.get('q_halt')
@@ -1552,7 +1553,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                         prev_z_L = torch.stack(batch_prev_states, dim=0)
 
             if use_amp:
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda', dtype=amp_dtype):
                     result = model(
                         train_in, train_out, test_in, demo_mask,
                         task_ids=task_ids,
@@ -1681,18 +1682,9 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     for opt in optimizers:
                         xm.optimizer_step(opt)
                 elif use_amp:
-                    # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
-                    for opt in optimizers:
-                        if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
-                            scaler.unscale_(opt)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
-                        if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
-                            scaler.step(opt)
-                        else:
-                            # Custom optimizer (e.g., CastedSparseEmbeddingSignSGD_Distributed)
-                            opt.step()
-                    scaler.update()
+                        opt.step()
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
