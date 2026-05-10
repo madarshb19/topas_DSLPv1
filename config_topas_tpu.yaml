@@ -34,12 +34,12 @@ training:
   eval_interval: 0
 
   # Data paths
-  train_data_dir: "./data"
+  train_data_dir: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data"
   eval_data_dir: ""
   train_challenges: ""
   train_solutions: ""
-  eval_challenges: "./data/arc-agi_evaluation_challenges.json"
-  eval_solutions: "./data/arc-agi_evaluation_solutions.json"
+  eval_challenges: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_challenges.json"
+  eval_solutions: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_solutions.json"
 
   output_dir: "./output_topas_tpu"
   epochs: 50000
