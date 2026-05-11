@@ -2013,7 +2013,7 @@ if __name__ == "__main__":
 
     if args.tpu:
         import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_mp_fn, args=(args,), nprocs=args.tpu_cores, start_method='fork')
+        xmp.spawn(_mp_fn, args=(args,), nprocs=None, start_method='fork')
     else:
         train(config_path=args.config, resume_checkpoint=args.resume,
               use_tpu=False, tpu_cores=args.tpu_cores)
