@@ -51,7 +51,7 @@ try:
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     import torch_xla.distributed.parallel_loader as pl
-    import torch_xla.distributed.xla_multiprocessing as xmp
+    import torch_xla.distributed.spmd as xs
     _TPU_AVAILABLE = True
 except ImportError:
     pass
@@ -970,14 +970,21 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     log_cfg = config.get("logging", {})
 
     # Device selection: TPU > CUDA > CPU
+    mesh = None  # will be set if TPU
     if use_tpu:
         if not _TPU_AVAILABLE:
             raise RuntimeError("TPU requested but torch_xla not available. Install: pip install torch_xla")
+        # Enable SPMD: single Python process, ops auto-sharded across all chips
+        xr.use_spmd()
         device = xm.xla_device()
-        print(f"TPU device: {device}")
+        num_devices = xr.global_runtime_device_count()
+        print(f"TPU SPMD: {num_devices} devices visible, device={device}")
+        # Mesh: shard along batch dimension across all chips
+        mesh_shape = (num_devices,)
+        device_ids = np.arange(num_devices)
+        mesh = xs.Mesh(device_ids, mesh_shape, ('batch',))
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     # Initialize logger
     logger = DSPLLogger(
         output_dir=train_cfg.get("output_dir", "./output"),
@@ -989,9 +996,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
     # Distributed setup (TPU or GPU)
     if use_tpu:
-        world_size = xr.world_size()         # was xm.xrt_world_size()
-        rank = xr.global_ordinal()           # was xm.get_ordinal()
-        logger.info(f"TPU distributed: rank {rank}/{world_size}")
+    # SPMD: one Python process, all chips visible via mesh sharding
+        world_size = 1
+        rank = 0
+        logger.info(f"TPU SPMD mode: {xr.global_runtime_device_count()} chips, single process")
     else:
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         rank = int(os.environ.get("RANK", "0"))
@@ -1537,6 +1545,19 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
             demo_mask = demo_mask.to(device)
             task_ids = task_ids.to(device)
 
+            if use_tpu and mesh is not None:
+                # Shard along batch dim (first axis); None = replicated
+                xs.mark_sharding(train_in,   mesh, ('batch', None, None, None, None))  # [B, demos, C, H, W]
+                xs.mark_sharding(train_out,  mesh, ('batch', None, None, None, None))
+                xs.mark_sharding(test_in,    mesh, ('batch', None, None, None))        # [B, C, H, W]
+                xs.mark_sharding(target_out, mesh, ('batch', None, None, None))
+                xs.mark_sharding(demo_mask,  mesh, ('batch', None))                    # [B, demos]
+                xs.mark_sharding(task_ids,   mesh, ('batch',))                          # [B]
+                if content_mask is not None:
+                    xs.mark_sharding(content_mask, mesh, ('batch', None, None))         # [B, H, W]
+                if test_in_obj_mask is not None:
+                    xs.mark_sharding(test_in_obj_mask, mesh, ('batch', None, None))
+
             # --- PERSISTENCE LOGGING PATCH START ---
             # Track Recurrence to validate Infinite Persistence
             if task_ids is not None:
@@ -1989,31 +2010,13 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
         logger.close()
 
 
-def _mp_fn(rank, args):
-    """Per-core entry point for TPU multi-processing."""
-    train(
-        config_path=args.config,
-        resume_checkpoint=args.resume,
-        use_tpu=True,
-        tpu_cores=args.tpu_cores,
-    )
-
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Train DSPL model')
-    parser.add_argument('--config', type=str, default='config.yaml',
-                        help='Path to config file (default: config.yaml)')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint to resume from (overrides config)')
-    parser.add_argument('--tpu', action='store_true',
-                        help='Use TPU instead of GPU (requires torch_xla)')
-    parser.add_argument('--tpu-cores', type=int, default=8,
-                        help='Number of TPU cores (default: 8 for v5e-8)')
+    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--tpu', action='store_true')
+    parser.add_argument('--tpu-cores', type=int, default=8)
     args = parser.parse_args()
-
-    if args.tpu:
-        import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_mp_fn, args=(args,), nprocs=None, start_method='fork')
-    else:
-        train(config_path=args.config, resume_checkpoint=args.resume,
-              use_tpu=False, tpu_cores=args.tpu_cores)
+    train(config_path=args.config, resume_checkpoint=args.resume,
+          use_tpu=args.tpu, tpu_cores=args.tpu_cores)
