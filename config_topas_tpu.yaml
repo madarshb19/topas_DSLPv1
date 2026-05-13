@@ -71,5 +71,5 @@ loss_weights:
 
 logging:
   experiment_name: "topas_base_tpu"
-  use_tensorboard: true
+  use_tensorboard: false
   vis_interval: 5
