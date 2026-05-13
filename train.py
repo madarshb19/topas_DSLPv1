@@ -1378,10 +1378,11 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Accumulate loss
                 loss = loss / accumulation_steps
-                if use_amp:
-                    scaler.scale(loss).backward()
+                # Backward pass (accumulates gradients)
+                if use_amp and scaler is not None:
+                    scaler.scale(scaled_loss).backward()
                 else:
-                    loss.backward()
+                    scaled_loss.backward()
                 accum_loss += loss.item()
 
                 # Track metrics
@@ -1684,10 +1685,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
             scaled_loss = loss / accumulation_steps
 
             # Backward pass (accumulates gradients)
-            if use_amp:
-                scaler.scale(scaled_loss).backward()
+            if use_amp and scaler is not None:
+                scaler.scale(loss).backward()
             else:
-                scaled_loss.backward()
+                loss.backward()
 
             # Accumulate metrics for logging
             accum_loss += loss.item()
