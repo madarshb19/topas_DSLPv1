@@ -578,15 +578,15 @@ def compute_loss(final_logits, inter_logits_list, halting_list, target_out,
     )
 
     return total_loss, {
-        'primary': loss_primary.item(),
-        'deep': loss_deep.item() if isinstance(loss_deep, torch.Tensor) else loss_deep,
-        'logic': loss_logic.item() if isinstance(loss_logic, torch.Tensor) else loss_logic,
-        'halt': loss_halt.item() if isinstance(loss_halt, torch.Tensor) else loss_halt,
-        'comp': loss_comp.item() if isinstance(loss_comp, torch.Tensor) else loss_comp,
-        'object': loss_object.item() if isinstance(loss_object, torch.Tensor) else loss_object,
-        'centroid': loss_centroid.item() if isinstance(loss_centroid, torch.Tensor) else loss_centroid,
-        'q_halt': loss_q_halt.item() if isinstance(loss_q_halt, torch.Tensor) else loss_q_halt,
-        'change_pct': (change_ratio.item() if isinstance(change_ratio, torch.Tensor) else change_ratio) * 100
+    'primary': loss_primary,
+    'deep': loss_deep,
+    'logic': loss_logic,
+    'halt': loss_halt,
+    'comp': loss_comp,
+    'object': loss_object,
+    'centroid': loss_centroid,
+    'q_halt': loss_q_halt,
+    'change_pct': change_ratio * 100,
     }
 
 
@@ -1691,35 +1691,36 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 loss.backward()
 
             # Accumulate metrics for logging
-            accum_loss += loss.item()
+            accum_loss = accum_loss + loss.detach()  # keep tensor
             for k in accum_losses:
-                accum_losses[k] += loss_dict.get(k, 0)
+                v = loss_dict.get(k, 0)
+                if isinstance(v, torch.Tensor):
+                    accum_losses[k] = accum_losses[k] + v.detach()
+                else:
+                    accum_losses[k] = accum_losses[k] + v
 
             # Accumulate accuracy metrics
+            # Accumulate accuracy metrics — keep on device, no .item() in hot loop
             with torch.no_grad():
                 pred = final_logits.argmax(dim=1)
                 target = target_out.argmax(dim=1)
                 actual_batch_size = pred.shape[0]
-
                 if content_mask is not None:
-                    accum_metrics['correct'] += ((pred == target) & content_mask).sum().item()
-                    accum_metrics['total_px'] += content_mask.sum().item()
+                    correct_t = ((pred == target) & content_mask).sum()
+                    total_t = content_mask.sum()
+                    # vectorized solve check: per-sample (all content pixels correct)
+                    per_sample_correct = ((pred == target) | ~content_mask).all(dim=-1).all(dim=-1)
+                    per_sample_has_content = content_mask.any(dim=-1).any(dim=-1)
+                    solves_t = (per_sample_correct & per_sample_has_content).sum()
                 else:
-                    accum_metrics['correct'] += (pred == target).sum().item()
-                    accum_metrics['total_px'] += pred.numel()
-
-                for b in range(actual_batch_size):
-                    if content_mask is not None:
-                        # All content pixels must be correct for a solve
-                        mask_b = content_mask[b]
-                        content_correct = ((pred[b] == target[b]) & mask_b).sum()
-                        content_total = mask_b.sum()
-                        if content_correct == content_total and content_total > 0:
-                            accum_metrics['solves'] += 1
-                    else:
-                        if (pred[b] == target[b]).all():
-                            accum_metrics['solves'] += 1
-                accum_metrics['count'] += actual_batch_size
+                    correct_t = (pred == target).sum()
+                    total_t = torch.tensor(pred.numel(), device=pred.device)
+                    solves_t = (pred == target).all(dim=-1).all(dim=-1).sum()
+            
+                accum_metrics['correct'] = accum_metrics.get('correct', 0) + correct_t
+                accum_metrics['total_px'] = accum_metrics.get('total_px', 0) + total_t
+                accum_metrics['solves'] = accum_metrics.get('solves', 0) + solves_t
+                accum_metrics['count'] = accum_metrics.get('count', 0) + actual_batch_size
 
             accum_step += 1
 
@@ -1860,15 +1861,25 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Logging (only after optimizer step)
                 if rank == 0:
-                    avg_loss = accum_loss / accumulation_steps
-                    acc = accum_metrics['correct'] / accum_metrics['total_px'] if accum_metrics['total_px'] > 0 else 0.0
-                    exact_acc = accum_metrics['solves'] / accum_metrics['count'] if accum_metrics['count'] > 0 else 0.0
-
-                    # Log line (use logger.info to ensure it's captured)
+                    # Materialize everything once, just before logging
+                    if use_tpu:
+                        xm.mark_step()
+                    avg_loss = (accum_loss / accumulation_steps)
+                    if isinstance(avg_loss, torch.Tensor):
+                        avg_loss = avg_loss.item()
+                    correct = accum_metrics['correct']
+                    total_px = accum_metrics['total_px']
+                    solves = accum_metrics['solves']
+                    count = accum_metrics['count']
+                    if isinstance(correct, torch.Tensor): correct = correct.item()
+                    if isinstance(total_px, torch.Tensor): total_px = total_px.item()
+                    if isinstance(solves, torch.Tensor): solves = solves.item()
+                    acc = correct / total_px if total_px > 0 else 0.0
+                    exact_acc = solves / count if count > 0 else 0.0
                     logger.info(
                         f"[{global_step}/{total_training_steps}] "
                         f"Loss={avg_loss:.4f} Acc={acc*100:.1f}% "
-                        f"Solves={accum_metrics['solves']}/{accum_metrics['count']} ({exact_acc*100:.1f}%)"
+                        f"Solves={solves}/{count} ({exact_acc*100:.1f}%)"
                     )
 
                     # TensorBoard logging
