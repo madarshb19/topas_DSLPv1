@@ -29,9 +29,9 @@ training:
   accumulation_steps: 1  # No accumulation needed, effective batch = 1024 × 8 = 8192
 
   # Step-based evaluation schedule
-  first_eval_step: 10000
+  first_eval_step: 1000   # safety net for the very first run
   eval_step_interval: 1000
-  eval_interval: 0
+  eval_interval: 99999  # effectively disabled; step-based eval handles it
 
   # Data paths
   train_data_dir: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data"
