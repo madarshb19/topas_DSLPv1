@@ -25,8 +25,8 @@ training:
 
   # TPU-optimized aggressive settings (16GB HBM per core × 8 cores)
   # 24M model + 30x30 grids = ~4GB/core at batch 1024
-  batch_size: 1024
-  accumulation_steps: 1  # No accumulation needed, effective batch = 1024 × 8 = 8192
+  batch_size: 128
+  accumulation_steps: 8        # effective batch = 128 × 8 = 1024 (trying to fit in kaggle TPU and avoid OOM)
 
   # Step-based evaluation schedule
   first_eval_step: 1000   # safety net for the very first run
