@@ -42,7 +42,7 @@ training:
   eval_solutions: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_solutions.json"
 
   output_dir: "./output_topas_tpu"
-  epochs: 3
+  epochs: 50000
   learning_rate: 0.0001
   amp: false             # TPU uses bfloat16 natively, no AMP needed
   log_interval: 10
