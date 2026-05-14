@@ -1058,15 +1058,6 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     train_cfg["_topas_mode"] = True
     logger.info(f"Train: {num_train_groups} groups, {num_train_tasks} puzzles")
 
-    # TPU: Wrap with ParallelLoader for async prefetching
-    if use_tpu:
-        # Create a simple DataLoader wrapper for ParallelLoader compatibility
-        train_loader = DataLoader(train_data, batch_size=None, num_workers=0)
-        train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
-        logger.info("TPU: Using ParallelLoader for async data prefetching")
-    else:
-        train_loader = train_data  # Direct iteration for GPU
-
     # Calculate total number of tasks for puzzle embeddings
     # IterableDataset doesn't have len(), use metadata instead
     if hasattr(eval_data, 'metadata'):
@@ -1329,6 +1320,13 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
     for epoch in range(start_epoch, num_epochs + 1):
         # IterableDataset handles shuffling internally via seed + iteration counter
+        # === FRESH DATALOADER EACH EPOCH ===
+        # ParallelLoader's per_device_loader is single-use; must recreate per epoch
+        if use_tpu:
+            _base_loader = DataLoader(train_data, batch_size=None, num_workers=0)
+            train_loader = pl.ParallelLoader(_base_loader, [device]).per_device_loader(device)
+        else:
+            train_loader = train_data
 
         # === FIX #3: Force Minimum Steps ===
         # Force 12 steps always - model was halting at 4 and plateauing
