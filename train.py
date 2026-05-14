@@ -1907,16 +1907,19 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
         # Log epoch summary
         if rank == 0:
-            # n_steps = number of optimizer steps this epoch (forward passes / accumulation_steps)
             n_forward = batch_idx + 1
             n_steps = n_forward // accumulation_steps
             if n_steps > 0:
-                # Divide by total forward passes to get true per-batch average
                 n_batches = n_steps * accumulation_steps
-                avg_epoch_losses = {k: v / n_batches for k, v in epoch_losses.items()}
-                logger.log_epoch(epoch, total_loss / n_batches, avg_epoch_losses, current_lr)
+                if use_tpu:
+                    xm.mark_step()
+                tl = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
+                avg_epoch_losses = {
+                    k: (v.item() if isinstance(v, torch.Tensor) else v) / n_batches
+                    for k, v in epoch_losses.items()
+                }
+                logger.log_epoch(epoch, tl / n_batches, avg_epoch_losses, current_lr)
 
-        # Epoch end: evaluate
         # Epoch end: evaluate
         if epoch % train_cfg.get("eval_interval", 1) == 0:
             if world_size > 1:
