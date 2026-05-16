@@ -1,3 +1,9 @@
+### KAGGLE TPU dependency resolve ###
+import os
+for _k in ("TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"):
+    if _k in os.environ:
+        os.environ.pop(_k)
+
 # ============================================================
 # TF MODULE STUB — must be first, before any other imports
 # Fixes broken tensorflow namespace after tf→tensorflow-cpu swap
@@ -972,17 +978,15 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     # Device selection: TPU > CUDA > CPU
     mesh = None  # will be set if TPU
     if use_tpu:
-        if not _TPU_AVAILABLE:
-            raise RuntimeError("TPU requested but torch_xla not available. Install: pip install torch_xla")
-        # Enable SPMD: single Python process, ops auto-sharded across all chips
-        xr.use_spmd()
         device = xm.xla_device()
-        num_devices = xr.global_runtime_device_count()
-        print(f"TPU SPMD: {num_devices} devices visible, device={device}")
-        # Mesh: shard along batch dimension across all chips
-        mesh_shape = (num_devices,)
-        device_ids = np.arange(num_devices)
-        mesh = xs.Mesh(device_ids, mesh_shape, ('batch',))
+        try:
+            world_size = xm.xrt_world_size()
+            rank = xm.get_ordinal()
+        except AttributeError:
+            # newer torch_xla API
+            world_size = xr.world_size()
+            rank = xr.global_ordinal()
+        print(f"[rank {rank}/{world_size}] device={device}", flush=True)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Initialize logger
@@ -995,12 +999,12 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     logger.log_config(config)
 
     # Distributed setup (TPU or GPU)
-    if use_tpu:
-    # SPMD: one Python process, all chips visible via mesh sharding
-        world_size = 1
-        rank = 0
-        logger.info(f"TPU SPMD mode: {xr.global_runtime_device_count()} chips, single process")
-    else:
+    # if use_tpu:
+    # # SPMD: one Python process, all chips visible via mesh sharding
+    #     world_size = 1
+    #     rank = 0
+    #     logger.info(f"TPU SPMD mode: {xr.global_runtime_device_count()} chips, single process")
+    if not use_tpu:
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         rank = int(os.environ.get("RANK", "0"))
         if world_size > 1:
@@ -1544,18 +1548,18 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
             demo_mask = demo_mask.to(device)
             task_ids = task_ids.to(device)
 
-            if use_tpu and mesh is not None:
-                # Shard along batch dim (first axis); None = replicated
-                xs.mark_sharding(train_in,   mesh, ('batch', None, None, None, None))  # [B, demos, C, H, W]
-                xs.mark_sharding(train_out,  mesh, ('batch', None, None, None, None))
-                xs.mark_sharding(test_in,    mesh, ('batch', None, None, None))        # [B, C, H, W]
-                xs.mark_sharding(target_out, mesh, ('batch', None, None, None))
-                xs.mark_sharding(demo_mask,  mesh, ('batch', None))                    # [B, demos]
-                xs.mark_sharding(task_ids,   mesh, ('batch',))                          # [B]
-                if content_mask is not None:
-                    xs.mark_sharding(content_mask, mesh, ('batch', None, None))         # [B, H, W]
-                if test_in_obj_mask is not None:
-                    xs.mark_sharding(test_in_obj_mask, mesh, ('batch', None, None))
+            # if use_tpu and mesh is not None:
+            #     # Shard along batch dim (first axis); None = replicated
+            #     xs.mark_sharding(train_in,   mesh, ('batch', None, None, None, None))  # [B, demos, C, H, W]
+            #     xs.mark_sharding(train_out,  mesh, ('batch', None, None, None, None))
+            #     xs.mark_sharding(test_in,    mesh, ('batch', None, None, None))        # [B, C, H, W]
+            #     xs.mark_sharding(target_out, mesh, ('batch', None, None, None))
+            #     xs.mark_sharding(demo_mask,  mesh, ('batch', None))                    # [B, demos]
+            #     xs.mark_sharding(task_ids,   mesh, ('batch',))                          # [B]
+            #     if content_mask is not None:
+            #         xs.mark_sharding(content_mask, mesh, ('batch', None, None))         # [B, H, W]
+            #     if test_in_obj_mask is not None:
+            #         xs.mark_sharding(test_in_obj_mask, mesh, ('batch', None, None))
 
             # --- PERSISTENCE LOGGING PATCH START ---
             # Track Recurrence to validate Infinite Persistence
@@ -2023,6 +2027,15 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
         logger.close()
 
 
+def _mp_fn(rank, args):
+    """Per-core entry point for TPU multi-processing."""
+    train(
+        config_path=args.config,
+        resume_checkpoint=args.resume,
+        use_tpu=True,
+        tpu_cores=args.tpu_cores,
+    )
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Train DSPL model')
@@ -2031,5 +2044,10 @@ if __name__ == "__main__":
     parser.add_argument('--tpu', action='store_true')
     parser.add_argument('--tpu-cores', type=int, default=8)
     args = parser.parse_args()
-    train(config_path=args.config, resume_checkpoint=args.resume,
-          use_tpu=args.tpu, tpu_cores=args.tpu_cores)
+
+    if args.tpu:
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(_mp_fn, args=(args,), start_method='fork', nprocs=None)
+    else:
+        train(config_path=args.config, resume_checkpoint=args.resume,
+              use_tpu=False, tpu_cores=args.tpu_cores)
