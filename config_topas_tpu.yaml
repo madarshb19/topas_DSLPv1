@@ -25,8 +25,8 @@ training:
 
   # TPU-optimized aggressive settings (16GB HBM per core × 8 cores)
   # 24M model + 30x30 grids = ~4GB/core at batch 1024
-  batch_size: 64
-  accumulation_steps: 16        # effective batch = 64 × 16 = 1024 (trying to fit in kaggle TPU and avoid OOM)
+  batch_size: 128
+  accumulation_steps: 1        # effective batch = 64 × 16 = 1024 (trying to fit in kaggle TPU and avoid OOM)
 
   # Step-based evaluation schedule
   first_eval_step: 1000   # safety net for the very first run
@@ -42,7 +42,7 @@ training:
   eval_solutions: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_solutions.json"
 
   output_dir: "./output_topas_tpu"
-  epochs: 50000
+  epochs: 5
   learning_rate: 0.0001
   amp: false             # TPU uses bfloat16 natively, no AMP needed
   log_interval: 10
