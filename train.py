@@ -1415,8 +1415,8 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 # Optimizer step
                 if (batch_idx + 1) % accumulation_steps == 0:
                     if use_tpu:
-                        # TPU: Use xm.optimizer_step for gradient sync across cores
-                        xm.optimizer_step(optimizer, barrier=True)
+                        optimizer.step()
+                        xm.mark_step()
                     elif use_amp:
                         scaler.step(optimizer)
                         scaler.update()
@@ -1742,10 +1742,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Clip gradients and step optimizer
                 if use_tpu:
-                    # TPU: Use xm.optimizer_step for gradient sync across cores
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
-                        xm.optimizer_step(opt, barrier=True)
+                        opt.step()
+                    xm.mark_step()
                 elif use_amp:
                     # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
                     for opt in optimizers:
