@@ -1092,7 +1092,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     logger.log_model_info(model)
     logger.info(f"Puzzle embedding: ndim={puzzle_emb_ndim}, num_tasks={num_total_tasks}")
 
-    if world_size > 1:
+    if world_size > 1 and not use_tpu:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[device.index], output_device=device.index, find_unused_parameters=True
         )
