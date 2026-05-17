@@ -1756,8 +1756,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 if use_tpu:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                     for opt in optimizers:
-                        opt.step()
-                    xm.mark_step()
+                        xm.optimizer_step(opt)
                 elif use_amp:
                     # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
                     for opt in optimizers:
@@ -1887,8 +1886,6 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 # Logging (only after optimizer step)
                 if rank == 0:
                     # Materialize everything once, just before logging
-                    if use_tpu:
-                        xm.mark_step()
                     avg_loss = (accum_loss / accumulation_steps)
                     if isinstance(avg_loss, torch.Tensor):
                         avg_loss = avg_loss.item()
