@@ -1384,6 +1384,11 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 if use_amp and scaler is not None:
                     scaler.scale(scaled_loss).backward()
                 else:
+                    if torch.isnan(loss).any() or torch.isinf(loss).any():
+                        logger.warning(f"[Step {global_step}] NaN/Inf detected, skipping")
+                        for opt in optimizers:
+                            opt.zero_grad()
+                        continue
                     scaled_loss.backward()
                 accum_loss += loss.item()
 
@@ -1682,6 +1687,13 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     centroid_pred=centroid_pred, target_centroids=target_centroids, w_centroid=w_centroid,
                     q_logits=q_logits, w_q_halt=w_q_halt
                 )
+
+            # Anomaly detection: skip NaN/Inf/spike batches before they corrupt the model
+            if torch.isnan(loss).any() or torch.isinf(loss).any() or loss.item() > 50.0:
+                if rank == 0:
+                    logger.warning(f"[Step {global_step}] Skipping bad batch: loss={loss.item():.2f}")
+                # Don't backward, don't step, don't update accum_step — just drop this batch
+                continue
 
             # Scale loss for gradient accumulation
             scaled_loss = loss / accumulation_steps
