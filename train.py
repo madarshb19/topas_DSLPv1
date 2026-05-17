@@ -1754,9 +1754,14 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Clip gradients and step optimizer
                 if use_tpu:
+                    # Manual all-reduce: xm.optimizer_step can't introspect MuonClip
+                    grads = [p.grad for p in model.parameters() if p.grad is not None]
+                    if grads:
+                        xm.all_reduce(xm.REDUCE_SUM, grads, scale=1.0 / max(world_size, 1))
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                     for opt in optimizers:
-                        xm.optimizer_step(opt)
+                        opt.step()
+                    xm.mark_step()
                 elif use_amp:
                     # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
                     for opt in optimizers:
