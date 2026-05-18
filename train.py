@@ -1890,16 +1890,21 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                         for key, value in accum_losses.items():
                             logger.tb_writer.add_scalar(f"train/loss_{key}", value / accumulation_steps, global_step)
 
-                # Accumulate for epoch summary
-                total_loss += accum_loss
+                # Accumulate for epoch summary — materialize first to break lazy chain
+                total_loss += accum_loss.item() if isinstance(accum_loss, torch.Tensor) else accum_loss
                 for k in epoch_losses:
-                    epoch_losses[k] += accum_losses[k]
+                    v = accum_losses[k]
+                    epoch_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
 
                 # Reset accumulation state
                 accum_step = 0
                 accum_loss = 0.0
                 accum_losses = {k: 0.0 for k in epoch_losses}
                 accum_metrics = {'correct': 0, 'total_px': 0, 'solves': 0, 'count': 0}
+
+            # Force XLA to materialize and release intermediates each batch
+            if use_tpu:
+                xm.mark_step()
 
         # Note: LR is now updated per-step, not per-epoch
 
