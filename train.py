@@ -1384,11 +1384,6 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 if use_amp and scaler is not None:
                     scaler.scale(scaled_loss).backward()
                 else:
-                    if torch.isnan(loss).any() or torch.isinf(loss).any():
-                        logger.warning(f"[Step {global_step}] NaN/Inf detected, skipping")
-                        for opt in optimizers:
-                            opt.zero_grad()
-                        continue
                     scaled_loss.backward()
                 accum_loss += loss.item()
 
@@ -1688,13 +1683,6 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     q_logits=q_logits, w_q_halt=w_q_halt
                 )
 
-            # Anomaly detection: skip NaN/Inf/spike batches before they corrupt the model
-            if torch.isnan(loss).any() or torch.isinf(loss).any() or loss.item() > 50.0:
-                if rank == 0:
-                    logger.warning(f"[Step {global_step}] Skipping bad batch: loss={loss.item():.2f}")
-                # Don't backward, don't step, don't update accum_step — just drop this batch
-                continue
-
             # Scale loss for gradient accumulation
             scaled_loss = loss / accumulation_steps
 
@@ -1754,11 +1742,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Clip gradients and step optimizer
                 if use_tpu:
-                    # Manual all-reduce: xm.optimizer_step can't introspect MuonClip
-                    grads = [p.grad for p in model.parameters() if p.grad is not None]
-                    if grads:
-                        xm.all_reduce(xm.REDUCE_SUM, grads, scale=1.0 / max(world_size, 1))
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         opt.step()
                     xm.mark_step()
@@ -1767,7 +1751,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     for opt in optimizers:
                         if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
                             scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
                             scaler.step(opt)
@@ -1776,7 +1760,7 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                             opt.step()
                     scaler.update()
                 else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         opt.step()
 
@@ -1792,93 +1776,82 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 first_eval_step = train_cfg.get("first_eval_step", 0)
                 should_eval = (first_eval_step > 0 and global_step == first_eval_step) or \
                               (eval_step_interval > 0 and global_step % eval_step_interval == 0)
-                if should_eval:
-                    # All ranks: enter rendezvous before eval
-                    if world_size > 1:
-                        if use_tpu:
-                            xm.rendezvous("step_eval_start")
-                        else:
-                            torch.distributed.barrier()
+                if should_eval and rank == 0:
+                    logger.info(f"[Step {global_step}] Running step-based evaluation...")
+                    eval_model = ema_model if use_ema else model
+                    if hasattr(eval_model, 'module'):
+                        eval_model = eval_model.module
+                    eval_model.eval()
+                    step_eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
+                    model.train()
 
-                    # Only rank 0 runs eval and does all logging/saving
-                    if rank == 0:
-                        logger.info(f"[Step {global_step}] Running step-based evaluation...")
-                        eval_model = ema_model if use_ema else model
-                        if hasattr(eval_model, 'module'):
-                            eval_model = eval_model.module
-                        eval_model.eval()
-                        step_eval_results = evaluate(eval_model, eval_data, device, min_steps=current_min_steps)
-                        model.train()
+                    step_acc = step_eval_results["accuracy"]
+                    step_avg_steps = step_eval_results["avg_steps"]
+                    step_pixel_acc = step_eval_results["pixel_acc"]
+                    step_nonzero_acc = step_eval_results["nonzero_acc"]
+                    step_mean_iou = step_eval_results["mean_iou"]
+                    step_partial = step_eval_results["partial_matches"]
+                    step_per_class = step_eval_results["per_class_acc"]
 
-                        step_acc = step_eval_results["accuracy"]
-                        step_avg_steps = step_eval_results["avg_steps"]
-                        step_pixel_acc = step_eval_results["pixel_acc"]
-                        step_nonzero_acc = step_eval_results["nonzero_acc"]
-                        step_mean_iou = step_eval_results["mean_iou"]
-                        step_partial = step_eval_results["partial_matches"]
-                        step_per_class = step_eval_results["per_class_acc"]
+                    # Full eval logging (matches epoch-end format)
+                    logger.info(
+                        f"[Step {global_step}] Eval: {step_eval_results['solved']}/{step_eval_results['total']} solved "
+                        f"({step_acc*100:.2f}%) | Pixel Acc: {step_pixel_acc*100:.2f}% | "
+                        f"Non-BG Acc: {step_nonzero_acc*100:.2f}% | mIoU: {step_mean_iou*100:.2f}%"
+                    )
+                    logger.info(
+                        f"[Step {global_step}] Partial matches: >90%: {step_partial['>90%']}, "
+                        f">80%: {step_partial['>80%']}, >70%: {step_partial['>70%']}, >50%: {step_partial['>50%']} | "
+                        f"Avg Steps: {step_avg_steps:.1f}"
+                    )
+                    # Per-class accuracy
+                    class_strs = [f"C{i}:{v*100:.1f}%" for i, v in enumerate(step_per_class) if v is not None]
+                    if class_strs:
+                        logger.info(f"[Step {global_step}] Per-class Acc: {' '.join(class_strs)}")
 
-                        logger.info(
-                            f"[Step {global_step}] Eval: {step_eval_results['solved']}/{step_eval_results['total']} solved "
-                            f"({step_acc*100:.2f}%) | Pixel Acc: {step_pixel_acc*100:.2f}% | "
-                            f"Non-BG Acc: {step_nonzero_acc*100:.2f}% | mIoU: {step_mean_iou*100:.2f}%"
+                    # Per-task non-BG accuracy - show top 10 performers
+                    task_nonbg_list = step_eval_results.get("task_nonbg_accs", [])
+                    if task_nonbg_list:
+                        sorted_tasks = sorted(enumerate(task_nonbg_list), key=lambda x: x[1], reverse=True)
+                        top_10 = sorted_tasks[:10]
+                        top_strs = [f"T{idx}:{acc*100:.1f}%" for idx, acc in top_10]
+                        logger.info(f"[Step {global_step}] Top 10 tasks (Non-BG): {' '.join(top_strs)}")
+                        best_idx, best_acc = top_10[0]
+                        logger.info(f"[Step {global_step}] Best task: T{best_idx} at {best_acc*100:.2f}% Non-BG")
+
+                    # TensorBoard logging
+                    if logger.tb_writer:
+                        logger.tb_writer.add_scalar("eval_step/accuracy", step_acc, global_step)
+                        logger.tb_writer.add_scalar("eval_step/pixel_accuracy", step_pixel_acc, global_step)
+                        logger.tb_writer.add_scalar("eval_step/nonzero_accuracy", step_nonzero_acc, global_step)
+                        logger.tb_writer.add_scalar("eval_step/mean_iou", step_mean_iou, global_step)
+                        logger.tb_writer.add_scalar("eval_step/avg_steps", step_avg_steps, global_step)
+                        logger.tb_writer.add_scalar("eval_step/partial_90", step_partial['>90%'], global_step)
+                        logger.tb_writer.add_scalar("eval_step/partial_80", step_partial['>80%'], global_step)
+
+                    # Generate PDF visualization for step-based evals
+                    try:
+                        from visualization import create_eval_pdf_visualization
+                        vis_results = create_eval_pdf_visualization(
+                            eval_model, eval_data, device, global_step, logger.vis_dir,
+                            tasks_per_page=10, pad_class=10, min_steps=current_min_steps,
+                            filename_prefix=f"step_{global_step}"
                         )
                         logger.info(
-                            f"[Step {global_step}] Partial matches: >90%: {step_partial['>90%']}, "
-                            f">80%: {step_partial['>80%']}, >70%: {step_partial['>70%']}, >50%: {step_partial['>50%']} | "
-                            f"Avg Steps: {step_avg_steps:.1f}"
+                            f"[Step {global_step}] Generated PDF visualization: {vis_results['pdf_path']} "
+                            f"({vis_results['total_correct']}/{vis_results['total']} correct)"
                         )
+                        logger.info(
+                            f"[Step {global_step}] Errors: Wrong={vis_results['total_wrong_color']}, "
+                            f"Missed={vis_results['total_missed']}, FP={vis_results['total_false_pos']}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to generate PDF visualization: {e}")
 
-                        class_strs = [f"C{i}:{v*100:.1f}%" for i, v in enumerate(step_per_class) if v is not None]
-                        if class_strs:
-                            logger.info(f"[Step {global_step}] Per-class Acc: {' '.join(class_strs)}")
-
-                        task_nonbg_list = step_eval_results.get("task_nonbg_accs", [])
-                        if task_nonbg_list:
-                            sorted_tasks = sorted(enumerate(task_nonbg_list), key=lambda x: x[1], reverse=True)
-                            top_10 = sorted_tasks[:10]
-                            top_strs = [f"T{idx}:{acc*100:.1f}%" for idx, acc in top_10]
-                            logger.info(f"[Step {global_step}] Top 10 tasks (Non-BG): {' '.join(top_strs)}")
-                            best_idx, best_acc = top_10[0]
-                            logger.info(f"[Step {global_step}] Best task: T{best_idx} at {best_acc*100:.2f}% Non-BG")
-
-                        if logger.tb_writer:
-                            logger.tb_writer.add_scalar("eval_step/accuracy", step_acc, global_step)
-                            logger.tb_writer.add_scalar("eval_step/pixel_accuracy", step_pixel_acc, global_step)
-                            logger.tb_writer.add_scalar("eval_step/nonzero_accuracy", step_nonzero_acc, global_step)
-                            logger.tb_writer.add_scalar("eval_step/mean_iou", step_mean_iou, global_step)
-                            logger.tb_writer.add_scalar("eval_step/avg_steps", step_avg_steps, global_step)
-                            logger.tb_writer.add_scalar("eval_step/partial_90", step_partial['>90%'], global_step)
-                            logger.tb_writer.add_scalar("eval_step/partial_80", step_partial['>80%'], global_step)
-
-                        try:
-                            from visualization import create_eval_pdf_visualization
-                            vis_results = create_eval_pdf_visualization(
-                                eval_model, eval_data, device, global_step, logger.vis_dir,
-                                tasks_per_page=10, pad_class=10, min_steps=current_min_steps,
-                                filename_prefix=f"step_{global_step}"
-                            )
-                            logger.info(
-                                f"[Step {global_step}] Generated PDF visualization: {vis_results['pdf_path']} "
-                                f"({vis_results['total_correct']}/{vis_results['total']} correct)"
-                            )
-                            logger.info(
-                                f"[Step {global_step}] Errors: Wrong={vis_results['total_wrong_color']}, "
-                                f"Missed={vis_results['total_missed']}, FP={vis_results['total_false_pos']}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to generate PDF visualization: {e}")
-
-                        logger.save_checkpoint(model, optimizer, epoch, best=False, suffix=f"_step{global_step}",
-                                               extra_state={'global_step': global_step})
-                        logger.info(f"[Step {global_step}] Checkpoint saved")
-
-                    # All ranks: exit rendezvous after eval
-                    if world_size > 1:
-                        if use_tpu:
-                            xm.rendezvous("step_eval_end")
-                        else:
-                            torch.distributed.barrier()
+                    # Save checkpoint after each step-based eval (crash protection)
+                    logger.save_checkpoint(model, optimizer, epoch, best=False, suffix=f"_step{global_step}",
+                                           extra_state={'global_step': global_step})
+                    logger.info(f"[Step {global_step}] Checkpoint saved")
 
                 # Update EMA model
                 if use_ema and rank == 0:
@@ -1891,6 +1864,8 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                 # Logging (only after optimizer step)
                 if rank == 0:
                     # Materialize everything once, just before logging
+                    if use_tpu:
+                        xm.mark_step()
                     avg_loss = (accum_loss / accumulation_steps)
                     if isinstance(avg_loss, torch.Tensor):
                         avg_loss = avg_loss.item()
