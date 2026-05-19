@@ -1715,9 +1715,10 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     total_t = torch.tensor(pred.numel(), device=pred.device)
                     solves_t = (pred == target).all(dim=-1).all(dim=-1).sum()
             
-                accum_metrics['correct'] = accum_metrics.get('correct', 0) + correct_t
-                accum_metrics['total_px'] = accum_metrics.get('total_px', 0) + total_t
-                accum_metrics['solves'] = accum_metrics.get('solves', 0) + solves_t
+                # Materialize immediately to avoid building 8-deep lazy chain
+                accum_metrics['correct'] = accum_metrics.get('correct', 0) + correct_t.item()
+                accum_metrics['total_px'] = accum_metrics.get('total_px', 0) + total_t.item() if isinstance(total_t, torch.Tensor) else accum_metrics.get('total_px', 0) + total_t
+                accum_metrics['solves'] = accum_metrics.get('solves', 0) + solves_t.item()
                 accum_metrics['count'] = accum_metrics.get('count', 0) + actual_batch_size
 
             accum_step += 1
