@@ -1683,6 +1683,9 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
             loss_val = loss.item()
             if math.isnan(loss_val) or math.isinf(loss_val):
                 logger.warning(f"[Step {global_step}] NaN/Inf at loss={loss_val}, skipping batch")
+                # Release the bad batch's tensors before continuing
+                if use_tpu:
+                    xm.mark_step()
                 continue
 
             # Scale loss for gradient accumulation
