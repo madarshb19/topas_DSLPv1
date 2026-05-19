@@ -1679,6 +1679,12 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                     q_logits=q_logits, w_q_halt=w_q_halt
                 )
 
+            # NaN/Inf skip — drop this batch, don't backward, don't step
+            loss_val = loss.item()
+            if math.isnan(loss_val) or math.isinf(loss_val):
+                logger.warning(f"[Step {global_step}] NaN/Inf at loss={loss_val}, skipping batch")
+                continue
+
             # Scale loss for gradient accumulation
             scaled_loss = loss / accumulation_steps
 
