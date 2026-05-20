@@ -29,8 +29,8 @@ training:
   accumulation_steps: 32        # effective batch = 128 × 8 = 1024 (trying to fit in kaggle TPU and avoid OOM)
 
   # Step-based evaluation schedule
-  first_eval_step: 100   # safety net for the very first run
-  eval_step_interval: 500
+  first_eval_step: 999999   # safety net for the very first run
+  eval_step_interval: 999999
   eval_interval: 99999  # effectively disabled; step-based eval handles it
 
   # Data paths
