@@ -2018,11 +2018,34 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                         )
                         _, inter_logits, halt_probs = result[0], result[1], result[2]
                         logger.log_halting_probs(epoch, halt_probs)
-                # Save periodic checkpoint every 50 epochs
-                if epoch % 50 == 0:
+                # Save periodic checkpoint every 10 epochs
+                if epoch % 10 == 0:
                     logger.save_checkpoint(model, optimizer, epoch, best=False, suffix=f"_epoch{epoch}",
                                            extra_state={'global_step': global_step})
                     logger.info(f"Periodic checkpoint saved at epoch {epoch}")
+                    
+                    # Rotate: keep only the 5 most recent + every 50th epoch
+                    try:
+                        ckpt_dir = os.path.dirname(logger.save_checkpoint.__func__.__code__.co_filename) if hasattr(logger.save_checkpoint, '__func__') else None
+                        # Fallback to known path
+                        ckpt_dir = os.path.join(train_cfg.get("output_dir", "./output"), "checkpoints")
+                        if os.path.exists(ckpt_dir):
+                            checkpoints = sorted(
+                                glob.glob(os.path.join(ckpt_dir, "dspl_model_epoch*.pth")),
+                                key=lambda p: int(p.split("epoch")[-1].split(".")[0])
+                            )
+                            # Keep last 5 + every 50th (milestones)
+                            to_keep = set(checkpoints[-5:])
+                            for ckpt in checkpoints:
+                                epoch_num = int(ckpt.split("epoch")[-1].split(".")[0])
+                                if epoch_num % 50 == 0:
+                                    to_keep.add(ckpt)
+                            for ckpt in checkpoints:
+                                if ckpt not in to_keep:
+                                    os.remove(ckpt)
+                                    logger.info(f"Pruned old checkpoint: {os.path.basename(ckpt)}")
+                    except Exception as e:
+                        logger.warning(f"Checkpoint rotation failed: {e}")
             if world_size > 1:
                 if use_tpu:
                     xm.rendezvous("sync")
