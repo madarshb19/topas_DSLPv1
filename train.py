@@ -1174,7 +1174,8 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
     fresh_optimizer = train_cfg.get("fresh_optimizer", False)  # Set True for fine-tuning with reset optimizer
     if resume_checkpoint and os.path.exists(resume_checkpoint):
         logger.info(f"Resuming from checkpoint: {resume_checkpoint}")
-        checkpoint = torch.load(resume_checkpoint, map_location=device, weights_only=False)
+        # Map xla:0 storages → CPU; model.to(device) afterwards puts them back on TPU
+        checkpoint = torch.load(resume_checkpoint, map_location='cpu', weights_only=False)
         model_state = checkpoint['model_state_dict']
         if hasattr(model, 'module'):
             model.module.load_state_dict(model_state, strict=False)
