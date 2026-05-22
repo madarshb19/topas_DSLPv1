@@ -1811,7 +1811,12 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                         )
                 
                     # TPU: Use xm.optimizer_step for gradient sync across cores
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    # Replace the single clip_grad_norm_ call with this:
+                    canvas_params = [p for n, p in model.named_parameters() if n.startswith('canvas_core') and p.grad is not None]
+                    other_params  = [p for n, p in model.named_parameters() if not n.startswith('canvas_core') and p.grad is not None]
+                    
+                    torch.nn.utils.clip_grad_norm_(canvas_params, max_norm=2.0)   # tight on the bully (canvas core dominating grad updates)
+                    torch.nn.utils.clip_grad_norm_(other_params,  max_norm=5.0)   # loose on the rest
                     for opt in optimizers:
                         xm.optimizer_step(opt, barrier=True)
                 
@@ -1845,7 +1850,12 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                             f"per_group={ {k: f'{v:.3f}' for k, v in per_group.items()} }"
                         )
                 
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    # Replace the single clip_grad_norm_ call with this:
+                    canvas_params = [p for n, p in model.named_parameters() if n.startswith('canvas_core') and p.grad is not None]
+                    other_params  = [p for n, p in model.named_parameters() if not n.startswith('canvas_core') and p.grad is not None]
+                    
+                    torch.nn.utils.clip_grad_norm_(canvas_params, max_norm=2.0)   # tight on the bully (canvas core)
+                    torch.nn.utils.clip_grad_norm_(other_params,  max_norm=5.0)   # loose on the rest
                     for opt in optimizers:
                         if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
                             scaler.step(opt)
@@ -1878,7 +1888,12 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
                             f"per_group={ {k: f'{v:.3f}' for k, v in per_group.items()} }"
                         )
                 
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    # Replace the single clip_grad_norm_ call with this:
+                    canvas_params = [p for n, p in model.named_parameters() if n.startswith('canvas_core') and p.grad is not None]
+                    other_params  = [p for n, p in model.named_parameters() if not n.startswith('canvas_core') and p.grad is not None]
+                    
+                    torch.nn.utils.clip_grad_norm_(canvas_params, max_norm=2.0)   # tight on the bully (canvas core)
+                    torch.nn.utils.clip_grad_norm_(other_params,  max_norm=5.0)   # loose on the rest
                     for opt in optimizers:
                         opt.step()
                 
