@@ -946,6 +946,39 @@ def evaluate_with_ttt(model, eval_loader, device, ttt_config, num_classes=11, ve
         "task_nonbg_accs": task_nonbg_accs
     }
 
+def grad_health_check(model, log_per_group=False, logger=None):
+    """
+    Returns (is_finite, global_norm, per_group_norms_dict).
+    Forces XLA materialization via .item() — diagnostic use only.
+    """
+    total_sq = 0.0
+    per_group = {}
+    bad = False
+    bad_param = None
+
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        g = p.grad.detach().float()
+        finite = torch.isfinite(g).all().item()
+        if not finite:
+            bad = True
+            bad_param = name
+            break
+        sq = g.pow(2).sum().item()
+        total_sq += sq
+        if log_per_group:
+            # group by top-level module name (e.g. "logic_core", "canvas_core", "memory")
+            group = name.split(".")[0]
+            per_group[group] = per_group.get(group, 0.0) + sq
+
+    if bad and logger:
+        logger.warning(f"  non-finite gradient in: {bad_param}")
+
+    global_norm = total_sq ** 0.5 if not bad else float("nan")
+    per_group = {k: v ** 0.5 for k, v in per_group.items()}
+    return (not bad), global_norm, per_group
+
 
 def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_cores=8):
     """Main training function.
@@ -1749,32 +1782,109 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
 
                 # Clip gradients and step optimizer
                 if use_tpu:
+                    # NEW: materialize gradients so we can inspect them
+                    xm.mark_step()
+                
+                    # NEW: gradient health check
+                    is_finite, grad_norm, per_group = grad_health_check(
+                        model, log_per_group=True, logger=logger
+                    )
+                    if not is_finite:
+                        logger.warning(f"[Step {global_step}] NON-FINITE GRADIENT — skipping optimizer step")
+                        logger.warning(f"  per-group norms (last computed): {per_group}")
+                        for opt in optimizers:
+                            opt.zero_grad()
+                        xm.mark_step()
+                        global_step += 1
+                        # Reset accumulation state so the next batch starts a fresh cycle
+                        accum_step = 0
+                        accum_loss = 0.0
+                        accum_losses = {k: 0.0 for k in epoch_losses}
+                        accum_metrics = {'correct': 0, 'total_px': 0, 'solves': 0, 'count': 0}
+                        continue
+                
+                    # NEW: diagnostic logging every 10 steps
+                    if global_step % 10 == 0:
+                        logger.info(
+                            f"  grad_norm={grad_norm:.4f} "
+                            f"per_group={ {k: f'{v:.3f}' for k, v in per_group.items()} }"
+                        )
+                
                     # TPU: Use xm.optimizer_step for gradient sync across cores
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         xm.optimizer_step(opt, barrier=True)
+                
                 elif use_amp:
                     # Only unscale/scale PyTorch optimizers (not custom embedding optimizer)
                     for opt in optimizers:
                         if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
                             scaler.unscale_(opt)
+                
+                    # NEW: health check (after unscale, before clip)
+                    is_finite, grad_norm, per_group = grad_health_check(
+                        model, log_per_group=True, logger=logger
+                    )
+                    if not is_finite:
+                        logger.warning(f"[Step {global_step}] NON-FINITE GRADIENT — skipping optimizer step")
+                        logger.warning(f"  per-group norms (last computed): {per_group}")
+                        for opt in optimizers:
+                            opt.zero_grad()
+                        xm.mark_step()
+                        global_step += 1
+                        # Reset accumulation state so the next batch starts a fresh cycle
+                        accum_step = 0
+                        accum_loss = 0.0
+                        accum_losses = {k: 0.0 for k in epoch_losses}
+                        accum_metrics = {'correct': 0, 'total_px': 0, 'solves': 0, 'count': 0}
+                        continue
+                
+                    if global_step % 10 == 0:
+                        logger.info(
+                            f"  grad_norm={grad_norm:.4f} "
+                            f"per_group={ {k: f'{v:.3f}' for k, v in per_group.items()} }"
+                        )
+                
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         if hasattr(opt, '_is_pytorch_optimizer') or isinstance(opt, torch.optim.Optimizer) or hasattr(opt, 'base_optimizer'):
                             scaler.step(opt)
                         else:
-                            # Custom optimizer (e.g., CastedSparseEmbeddingSignSGD_Distributed)
                             opt.step()
                     scaler.update()
+                
                 else:
+                    # NEW: health check
+                    is_finite, grad_norm, per_group = grad_health_check(
+                        model, log_per_group=True, logger=logger
+                    )
+                    if not is_finite:
+                        logger.warning(f"[Step {global_step}] NON-FINITE GRADIENT — skipping optimizer step")
+                        logger.warning(f"  per-group norms (last computed): {per_group}")
+                        for opt in optimizers:
+                            opt.zero_grad()
+                        xm.mark_step()
+                        global_step += 1
+                        # Reset accumulation state so the next batch starts a fresh cycle
+                        accum_step = 0
+                        accum_loss = 0.0
+                        accum_losses = {k: 0.0 for k in epoch_losses}
+                        accum_metrics = {'correct': 0, 'total_px': 0, 'solves': 0, 'count': 0}
+                        continue
+                
+                    if global_step % 10 == 0:
+                        logger.info(
+                            f"  grad_norm={grad_norm:.4f} "
+                            f"per_group={ {k: f'{v:.3f}' for k, v in per_group.items()} }"
+                        )
+                
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     for opt in optimizers:
                         opt.step()
-
+                
                 # Zero gradients for next accumulation
                 for opt in optimizers:
                     opt.zero_grad()
-
                 # Increment global step
                 global_step += 1
 
