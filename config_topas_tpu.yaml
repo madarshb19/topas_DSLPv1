@@ -42,19 +42,19 @@ training:
   eval_solutions: "/kaggle/input/datasets/madarshbb/topas-dlsp-v1-augmented-data/topas_DSLPv1/data/arc-agi_evaluation_solutions.json"
 
   output_dir: "./output_topas_tpu"
-  epochs: 200
-  learning_rate: 0.00008
+  epochs: 5000
+  learning_rate: 0.0001
   amp: false             # TPU uses bfloat16 natively, no AMP needed
   log_interval: 10
 
 regularization:
   weight_decay: 0.0001
-  ema: false
+  ema: true
   ema_decay: 0.999
   stream_dropout: 0.1
   puzzle_emb_lr: 0.01
   puzzle_emb_wd: 0.01
-  lr_warmup_steps: 100
+  lr_warmup_steps: 500
   lr_min_ratio: 0.01
   freeze_weights: false
 
@@ -66,7 +66,7 @@ loss_weights:
   halting: 0.1
   complexity: 0.01
   change_weight: 1.0
-  object_count: 0.0
+  object_count: 0.5
   centroid: 0.0
 
 logging:
