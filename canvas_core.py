@@ -149,10 +149,16 @@ class CanvasCoreLayer(nn.Module):
         if valid_mask is not None:
             x_norm2 = x_norm2 * valid_mask  # Mask before attention query
 
-        cross_out, _ = self.cross_att(
-            x_norm2, logic_context, logic_context,
-            key_padding_mask=logic_pad_mask
-        )
+        # Run cross-attention in fp32 for TPU/bf16 stability.
+        orig_dtype = x_norm2.dtype
+        with torch.amp.autocast("xla", enabled=False):
+            cross_out, _ = self.cross_att(
+                x_norm2.float(),
+                logic_context.float(),
+                logic_context.float(),
+                key_padding_mask=logic_pad_mask
+            )
+        cross_out = cross_out.to(orig_dtype)
 
         # Stream dropout: optionally drop logic influence for some samples
         if self.training and stream_dropout > 0:
