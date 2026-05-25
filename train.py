@@ -1716,11 +1716,22 @@ def train(config_path="config.yaml", resume_checkpoint=None, use_tpu=False, tpu_
             # NaN/Inf skip — drop this batch, don't backward, don't step
             loss_val = loss.item()
             if math.isnan(loss_val) or math.isinf(loss_val):
-                logger.warning(f"[Step {global_step}] NaN/Inf at loss={loss_val}, skipping batch")
-                # Release the bad batch's tensors before continuing
+                logger.warning(f"[Step {global_step}] NaN/Inf at loss={loss_val}")
+            
+                logger.warning(
+                    "loss components finite: " +
+                    str({
+                        k: (torch.isfinite(v).all().item() if torch.is_tensor(v) else v)
+                        for k, v in loss_dict.items()
+                    })
+                )
+                logger.warning(f"final_logits finite={torch.isfinite(final_logits).all().item()}")
+                logger.warning(f"logic_states finite={all(torch.isfinite(s).all().item() for s in logic_states)}")
+            
                 if use_tpu:
                     xm.mark_step()
-                continue
+            
+                raise RuntimeError(f"Non-finite loss at step {global_step}")
 
             # Scale loss for gradient accumulation
             scaled_loss = loss / accumulation_steps
