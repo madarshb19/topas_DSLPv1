@@ -142,8 +142,15 @@ class LogicCoreLayer(nn.Module):
 
         # Cross-attention: Logic attending to Canvas context
         x_norm2 = self.norm2(x)
-        # No padding mask on canvas_context (canvas tokens are all valid)
-        cross_out, _ = self.cross_att(x_norm2, canvas_context, canvas_context)
+        # Run cross-attention in fp32 for TPU/bf16 stability.
+        orig_dtype = x_norm2.dtype
+        with torch.amp.autocast("xla", enabled=False):
+            cross_out, _ = self.cross_att(
+                x_norm2.float(),
+                canvas_context.float(),
+                canvas_context.float()
+            )
+        cross_out = cross_out.to(orig_dtype)
 
         # Apply stream dropout: possibly drop cross-stream info for some samples
         if self.training and stream_dropout > 0:
