@@ -486,22 +486,19 @@ class TOPASDSPLModel(nn.Module):
         final_pixels = outputs[-1]
         final_q = q_logits_list[-1]
 
-        # HARDENING: Force PAD class in padding regions
-        # valid_mask_2d is [B, 1, H, W], 1=valid, 0=padding
-        # Set padding pixels to have high PAD logit (index num_colors-1) and low others
-        pad_mask = (1.0 - valid_mask_2d)  # [B, 1, H, W], 1=padding, 0=valid
+        # HARDENING: Force PAD class in padding regions.
+        # Use torch.where, not arithmetic masking, because NaN * 0 is still NaN.
         pad_channel = self.num_colors - 1  # PAD is last channel (10)
-
-        # Create PAD logits: high for PAD channel, very negative for others
-        pad_logits = torch.full_like(final_pixels, -100.0)  # [B, C, H, W]
-        pad_logits[:, pad_channel, :, :] = 100.0  # High logit for PAD
-
-        # Blend: keep original for valid pixels, use PAD logits for padding
-        final_pixels = final_pixels * valid_mask_2d + pad_logits * pad_mask
-
-        # Also fix intermediate outputs
+        
+        pad_logits = torch.full_like(final_pixels, -100.0)
+        pad_logits[:, pad_channel, :, :] = 100.0
+        
+        valid_bool = valid_mask_2d.bool().expand_as(final_pixels)
+        
+        final_pixels = torch.where(valid_bool, final_pixels, pad_logits)
+        
         for i in range(len(outputs)):
-            outputs[i] = outputs[i] * valid_mask_2d + pad_logits * pad_mask
+            outputs[i] = torch.where(valid_bool, outputs[i], pad_logits)
 
         # Aux heads on final logic state
         final_logic = logic_states_hist[-1]
