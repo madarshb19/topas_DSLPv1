@@ -77,18 +77,24 @@ class RoPEMultiheadAttention(nn.Module):
         # Apply RoPE to Q and K
         q, k = self.rope(q, k, L)
 
-        # Compute attention scores
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-
-        # Apply padding mask if provided
+        # Compute attention scores in fp32 for bf16 TPU stability.
+        q_fp32 = q.float()
+        k_fp32 = k.float()
+        attn_scores = torch.matmul(q_fp32, k_fp32.transpose(-2, -1)) / self.scale
+        
+        # Prevent extreme logits from producing unstable softmax behavior.
+        attn_scores = torch.clamp(attn_scores, min=-50.0, max=50.0)
+        
         if key_padding_mask is not None:
-            # key_padding_mask: [B, L], True = ignore
             attn_scores = attn_scores.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2), float('-inf')
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
+                torch.finfo(attn_scores.dtype).min
             )
-
-        attn_probs = F.softmax(attn_scores, dim=-1)
+        
+        attn_probs = F.softmax(attn_scores, dim=-1).to(v.dtype)
         attn_probs = self.dropout(attn_probs)
+        
+        out = torch.matmul(attn_probs, v)
 
         # Apply attention to values
         out = torch.matmul(attn_probs, v)
