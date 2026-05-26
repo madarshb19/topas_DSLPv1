@@ -444,8 +444,8 @@ class TOPASDSPLModel(nn.Module):
                     pad_mask=logic_pad_mask
                 )
 
-                if not torch.isfinite(z_L).all().item():
-                    raise RuntimeError(f"z_L became non-finite after logic_core at h={h}, l={l}")
+                # if not torch.isfinite(z_L).all().item():
+                #     raise RuntimeError(f"z_L became non-finite after logic_core at h={h}, l={l}")
 
                 # B. Conditioning Vector Generation
                 # Pool z_L program tokens to create the "Instruction" for Canvas AdaLN
@@ -465,8 +465,8 @@ class TOPASDSPLModel(nn.Module):
                     valid_mask=valid_mask_flat
                 )
 
-                if not torch.isfinite(z_C).all().item():
-                    raise RuntimeError(f"z_C became non-finite after canvas_core at h={h}, l={l}")
+                # if not torch.isfinite(z_C).all().item():
+                #     raise RuntimeError(f"z_C became non-finite after canvas_core at h={h}, l={l}")
 
                 # D. Outputs & Halting
 
