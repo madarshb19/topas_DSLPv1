@@ -33,15 +33,22 @@ class AdaptiveLayerNorm(nn.Module):
         # 2. Apply Standard Norm
         x_norm = self.norm(x_perm)
 
-        # 3. Predict Scale and Shift
-        emb_out = self.emb_proj(emb)  # [B, 2*C]
-
+        # 3. Predict bounded Scale and Shift
+        emb_out = self.emb_proj(emb.float())  # [B, 2*C]
+        
         # Reshape for broadcasting over H, W: [B, 1, 1, 2*C]
         emb_out = emb_out.unsqueeze(1).unsqueeze(1)
-        scale, shift = emb_out.chunk(2, dim=-1)  # Each is [B, 1, 1, C]
-
+        scale, shift = emb_out.chunk(2, dim=-1)
+        
+        # Bound dynamic conditioning. Unbounded AdaLN can explode the canvas stream.
+        scale = 0.5 * torch.tanh(scale)
+        shift = 0.5 * torch.tanh(shift)
+        
+        scale = scale.to(x_norm.dtype)
+        shift = shift.to(x_norm.dtype)
+        
         # 4. Apply Affine (Modulate)
-        out = x_norm * (1 + scale) + shift
+        out = x_norm * (1.0 + scale) + shift
 
         # 5. Permute back to [B, C, H, W]
         return out.permute(0, 3, 1, 2)
@@ -126,6 +133,10 @@ class CanvasCoreLayer(nn.Module):
         h = self.conv1(x_grid)
         h = self.adagn1(h, puzzle_emb)  # Conditioned on Task!
         h = self.act1(h)
+
+        if not torch.isfinite(h).all().item():
+            raise RuntimeError("CanvasCoreLayer non-finite after conv1/adagn1/act1")
+    
         if mask_grid is not None:
             h = h * mask_grid  # Mask activations
 
@@ -135,6 +146,10 @@ class CanvasCoreLayer(nn.Module):
             h = h * mask_grid
         h = self.conv2(h)
         h = self.adagn2(h, puzzle_emb)  # Conditioned on Task!
+
+        if not torch.isfinite(h).all().item():
+            raise RuntimeError("CanvasCoreLayer non-finite after conv2/adagn2")
+        
         if mask_grid is not None:
             h = h * mask_grid  # Mask output of block 2
 
