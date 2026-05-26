@@ -134,8 +134,8 @@ class CanvasCoreLayer(nn.Module):
         h = self.adagn1(h, puzzle_emb)  # Conditioned on Task!
         h = self.act1(h)
 
-        if not torch.isfinite(h).all().item():
-            raise RuntimeError("CanvasCoreLayer non-finite after conv1/adagn1/act1")
+        # if not torch.isfinite(h).all().item():
+        #     raise RuntimeError("CanvasCoreLayer non-finite after conv1/adagn1/act1")
     
         if mask_grid is not None:
             h = h * mask_grid  # Mask activations
@@ -147,8 +147,8 @@ class CanvasCoreLayer(nn.Module):
         h = self.conv2(h)
         h = self.adagn2(h, puzzle_emb)  # Conditioned on Task!
 
-        if not torch.isfinite(h).all().item():
-            raise RuntimeError("CanvasCoreLayer non-finite after conv2/adagn2")
+        # if not torch.isfinite(h).all().item():
+        #     raise RuntimeError("CanvasCoreLayer non-finite after conv2/adagn2")
         
         if mask_grid is not None:
             h = h * mask_grid  # Mask output of block 2
